@@ -1,0 +1,17 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: acr-postgres
+    environment:
+      POSTGRES_USER: acr
+      POSTGRES_PASSWORD: acr
+      POSTGRES_DB: agent_context_repo
+    ports:
+      - "5432:5432"
+    volumes:
+      - acr_pgdata:/var/lib/postgresql/data
+
+volumes:
+  acr_pgdata:

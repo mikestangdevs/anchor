@@ -1,0 +1,31 @@
+{
+  "name": "@acr/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch"
+  },
+  "dependencies": {
+    "@acr/config": "workspace:*",
+    "@acr/types": "workspace:*",
+    "drizzle-orm": "^0.36.0",
+    "pgvector": "^0.2.0",
+    "postgres": "^3.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.4.0",
+    "drizzle-kit": "^0.30.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.0"
+  }
+}
