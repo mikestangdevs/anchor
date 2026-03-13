@@ -20,7 +20,7 @@ const program = new Command();
 program
   .name('acr')
   .description('Anchor — agent-first context infrastructure')
-  .version('0.1.0-beta.1')
+  .version('0.1.0-beta.2')
   .addHelpText('before', getCompactHeader());
 
 // ── Setup ──

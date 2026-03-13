@@ -1,6 +1,6 @@
 {
   "name": "anchor-acr",
-  "version": "0.1.0-beta.1",
+  "version": "0.1.0-beta.2",
   "description": "Anchor — agent-first context infrastructure. Ingest docs, search with citations, serve via MCP.",
   "type": "module",
   "bin": {
