@@ -4,7 +4,6 @@ export default defineConfig({
   entry: {
     index: 'src/index.ts',
     'mcp-server': 'src/mcp-server.ts',
-    postinstall: 'src/postinstall.ts',
   },
   format: ['esm'],
   target: 'node20',

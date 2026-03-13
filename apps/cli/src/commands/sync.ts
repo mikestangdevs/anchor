@@ -2,10 +2,9 @@ import { Command } from 'commander';
 import { eq } from 'drizzle-orm';
 import { getDb, closeDb, sources } from '@acr/db';
 import { requireDatabaseUrl, requireEmbeddingConfig } from '@acr/config';
-import { runSyncPipeline } from '../../../worker/src/sync-pipeline.js';
+import { runSyncPipeline, type SyncStats } from '../../../worker/src/sync-pipeline.js';
 import type { Source } from '@acr/types';
 
-// Badge map used by human output
 const BADGE: Record<string, string> = {
   github_repo: 'github',
   supabase_view: 'supabase',
@@ -67,6 +66,7 @@ export const syncCommand = new Command('sync')
         name: string;
         type: string;
         status: 'success' | 'error';
+        stats?: SyncStats;
         error?: string;
       }> = [];
 
@@ -76,8 +76,8 @@ export const syncCommand = new Command('sync')
           console.log(`Syncing: ${source.name} [${badge}]...`);
         }
         try {
-          await runSyncPipeline(source);
-          results.push({ name: source.name, type: source.sourceType, status: 'success' });
+          const syncStats = await runSyncPipeline(source);
+          results.push({ name: source.name, type: source.sourceType, status: 'success', stats: syncStats });
           if (!opts.json) {
             console.log(`✓ ${source.name} synced successfully`);
           }
@@ -93,7 +93,22 @@ export const syncCommand = new Command('sync')
       if (opts.json) {
         const success = results.filter(r => r.status === 'success').length;
         const errors = results.filter(r => r.status === 'error').length;
-        console.log(JSON.stringify({ results, summary: { total: results.length, success, errors } }, null, 2));
+        // Aggregate stats across all sources
+        const totals: SyncStats = {
+          processed: 0, changed: 0, unchanged: 0, skipped: 0, stale: 0, errors: 0, chunksCreated: 0,
+        };
+        for (const r of results) {
+          if (r.stats) {
+            totals.processed += r.stats.processed;
+            totals.changed += r.stats.changed;
+            totals.unchanged += r.stats.unchanged;
+            totals.skipped += r.stats.skipped;
+            totals.stale += r.stats.stale;
+            totals.errors += r.stats.errors;
+            totals.chunksCreated += r.stats.chunksCreated;
+          }
+        }
+        console.log(JSON.stringify({ results, summary: { total: results.length, success, errors, ...totals } }, null, 2));
       }
 
       await closeDb();

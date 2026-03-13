@@ -7,38 +7,17 @@ import { getEmbeddingProvider } from '@acr/embeddings';
 import { getConfig } from '@acr/config';
 import type { Source, RawPage, EmbeddingProvider } from '@acr/types';
 
-export interface SyncStats {
-  /** Brand-new documents indexed for the first time */
-  processed: number;
-  /** Existing documents reprocessed because content changed */
-  changed: number;
-  /** Existing documents skipped because content hash matched */
-  unchanged: number;
-  /** Pages ignored for validation reasons (too short, empty, etc.) */
-  skipped: number;
-  /** Documents previously seen but missing this run, marked non-latest */
-  stale: number;
-  /** Pages that threw errors during processing */
-  errors: number;
-  /** Total chunks created or recreated */
-  chunksCreated: number;
-}
-
-function emptyStats(): SyncStats {
-  return { processed: 0, changed: 0, unchanged: 0, skipped: 0, stale: 0, errors: 0, chunksCreated: 0 };
-}
-
 /**
  * Run the full sync pipeline for a single source.
  *
  * Steps:
  * 1. Create SyncJob record (status: running)
  * 2. Fetch raw pages via connector
- * 3. For each page: normalize → diff → skip/upsert → chunk → embed
- * 4. Mark unseen documents as stale (isLatest: false)
+ * 3. For each page: normalize → dedup → upsert document → chunk → embed → upsert chunks
+ * 4. Mark stale documents as not latest
  * 5. Complete SyncJob
  */
-export async function runSyncPipeline(source: Source): Promise<SyncStats> {
+export async function runSyncPipeline(source: Source): Promise<void> {
   const db = getDb();
   const embeddingProvider = getEmbeddingProvider();
 
@@ -53,7 +32,7 @@ export async function runSyncPipeline(source: Source): Promise<SyncStats> {
     })
     .returning();
 
-  const stats = emptyStats();
+  const stats = { processed: 0, skipped: 0, errors: 0, chunksCreated: 0 };
 
   try {
     // 2. Fetch raw pages
@@ -77,6 +56,7 @@ export async function runSyncPipeline(source: Source): Promise<SyncStats> {
       supabaseContentFields: source.supabaseContentFields ?? undefined,
       supabaseMetadataFields: source.supabaseMetadataFields ?? undefined,
       supabaseUpdatedAtField: source.supabaseUpdatedAtField ?? undefined,
+      // local_folder
       folderPath: source.folderPath ?? undefined,
       folderRecursive: source.folderRecursive ?? undefined,
       includePatterns: source.includePatterns ?? undefined,
@@ -99,7 +79,7 @@ export async function runSyncPipeline(source: Source): Promise<SyncStats> {
       }
     }
 
-    // 4. Mark unseen documents as stale
+    // 4. Mark unseen documents as not latest
     const existingDocs = await db
       .select({ id: documents.id, canonicalUrl: documents.canonicalUrl })
       .from(documents)
@@ -116,7 +96,6 @@ export async function runSyncPipeline(source: Source): Promise<SyncStats> {
           .update(documents)
           .set({ isLatest: false, updatedAt: new Date() })
           .where(eq(documents.id, doc.id));
-        stats.stale++;
       }
     }
 
@@ -130,16 +109,7 @@ export async function runSyncPipeline(source: Source): Promise<SyncStats> {
       })
       .where(eq(syncJobs.id, syncJob.id));
 
-    const parts: string[] = [];
-    if (stats.processed > 0) parts.push(`${stats.processed} new`);
-    if (stats.changed > 0) parts.push(`${stats.changed} changed`);
-    if (stats.unchanged > 0) parts.push(`${stats.unchanged} unchanged`);
-    if (stats.stale > 0) parts.push(`${stats.stale} stale`);
-    if (stats.skipped > 0) parts.push(`${stats.skipped} skipped`);
-    if (stats.errors > 0) parts.push(`${stats.errors} errors`);
-    console.log(`  Sync completed: ${parts.join(', ')} (${stats.chunksCreated} chunks)`);
-
-    return stats;
+    console.log(`  Sync completed: ${stats.processed} processed, ${stats.skipped} skipped, ${stats.errors} errors, ${stats.chunksCreated} chunks`);
   } catch (err) {
     // Mark sync job as failed
     await db
@@ -168,7 +138,7 @@ async function processPage(
   source: Source,
   page: RawPage,
   seenUrls: Set<string>,
-  stats: SyncStats,
+  stats: { processed: number; skipped: number; errors: number; chunksCreated: number },
 ): Promise<void> {
   const content = page.rawMarkdown ?? '';
   if (!content || content.length < 50) {
@@ -179,12 +149,13 @@ async function processPage(
   // Normalize
   const cleaned = normalize(content);
   const versionHash = computeVersionHash(cleaned);
+  // Prefer H1 from markdown content, fall back to humanized filename
   const title = extractTitle(cleaned, page.title);
   const url = page.url;
 
   seenUrls.add(url);
 
-  // Check for existing document with same identity (source + canonical URL)
+  // Check for existing document with same URL
   const existingDocs = await db
     .select()
     .from(documents)
@@ -192,16 +163,14 @@ async function processPage(
       and(
         eq(documents.sourceId, source.id),
         eq(documents.canonicalUrl, url),
-        eq(documents.isLatest, true),
       ),
     )
     .limit(1);
 
   if (existingDocs.length > 0) {
     const existing = existingDocs[0];
-
     if (!hasContentChanged(existing.versionHash, versionHash)) {
-      // Content hasn't changed — update timestamps only
+      // Content hasn't changed — just update timestamps
       await db
         .update(documents)
         .set({
@@ -210,56 +179,18 @@ async function processPage(
           updatedAt: new Date(),
         })
         .where(eq(documents.id, existing.id));
-      stats.unchanged++;
+      stats.skipped++;
       return;
     }
 
-    // Content changed — update document in-place and replace chunks transactionally
-    await db.transaction(async (tx) => {
-      // Update document row
-      await tx
-        .update(documents)
-        .set({
-          title,
-          cleanedMarkdown: cleaned,
-          versionHash,
-          lastSeenAt: new Date(),
-          lastVerifiedAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(eq(documents.id, existing.id));
-
-      // Delete old chunks
-      await tx
-        .delete(chunks)
-        .where(eq(chunks.documentId, existing.id));
-    });
-
-    // Re-chunk and re-embed (outside transaction — embedding API calls are slow)
-    const chunkOutputs = chunkMarkdown(cleaned);
-    if (chunkOutputs.length > 0) {
-      const texts = chunkOutputs.map((c) => c.text);
-      const embeddings = await embeddingProvider.embed(texts);
-
-      const chunkValues = chunkOutputs.map((chunk, i) => ({
-        documentId: existing.id,
-        chunkIndex: chunk.chunkIndex,
-        sectionTitle: chunk.sectionTitle ?? null,
-        text: chunk.text,
-        embedding: embeddings[i],
-        tokenCount: chunk.tokenCount,
-        qualityScore: 1.0,
-      }));
-
-      await db.insert(chunks).values(chunkValues);
-      stats.chunksCreated += chunkOutputs.length;
-    }
-
-    stats.changed++;
-    return;
+    // Content changed — mark old version as not latest
+    await db
+      .update(documents)
+      .set({ isLatest: false, updatedAt: new Date() })
+      .where(eq(documents.id, existing.id));
   }
 
-  // New document — insert fresh
+  // Insert new document
   const [doc] = await db
     .insert(documents)
     .values({

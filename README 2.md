@@ -1,17 +1,5 @@
 # Anchor
 
-```
-░█████╗░███╗░░██╗░█████╗░██╗░░██╗░█████╗░██████╗
-██╔══██╗████╗░██║██╔══██╗██║░░██║██╔══██╗██╔══██╗
-███████║██╔██╗██║██║░░╚═╝███████║██║░░██║██████╔╝
-██╔══██║██║╚████║██║░░██╗██╔══██║██║░░██║██╔══██╗
-██║░░██║██║░╚███║╚█████╔╝██║░░██║╚█████╔╝██║░░██║
-╚═╝░░╚═╝╚═╝░░╚══╝░╚════╝░╚═╝░░╚═╝░╚════╝░╚═╝░░╚═╝
-```
-
-**Context, citations, and memory for agents.**
-Ground your agents in real context.
-
 Coding agents hallucinate APIs and work without context. Anchor gives them curated, searchable docs from your actual sources — local files, websites, GitHub repos, databases — with citations they can trust. Everything flows through a CLI and MCP server built for agents.
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -26,7 +14,7 @@ acr init                              # create config
 acr doctor                            # verify setup
 ```
 
-You'll need a Postgres database with pgvector ([Supabase](https://supabase.com) free tier works) and an embedding API key (OpenAI default, any compatible provider supported).
+You'll need a Postgres database with pgvector ([Supabase](https://supabase.com) free tier works) and an [OpenAI API key](https://platform.openai.com/api-keys) for embeddings.
 
 ```bash
 # edit .acr/config.json with DATABASE_URL and EMBEDDING_API_KEY
@@ -113,7 +101,7 @@ Tools: `search_context`, `get_document`, `save_annotation`, `list_sources`
 Sources → Fetch → Normalize → Chunk → Embed → Store → Search
 ```
 
-Anchor crawls your configured sources, converts everything to clean markdown, splits into chunks, generates embeddings, and stores them in Postgres with pgvector. Search queries are embedded the same way and matched via cosine similarity. Results come back with source attribution, section titles, and URLs — citation-ready.
+Anchor crawls your configured sources, converts everything to clean markdown, splits into chunks, generates embeddings via OpenAI, and stores them in Postgres with pgvector. Search queries are embedded the same way and matched via cosine similarity. Results come back with source attribution, section titles, and URLs — citation-ready.
 
 ## Configuration
 
