@@ -14,7 +14,7 @@ acr init                              # create config
 acr doctor                            # verify setup
 ```
 
-You'll need a Postgres database with pgvector ([Supabase](https://supabase.com) free tier works) and an [OpenAI API key](https://platform.openai.com/api-keys) for embeddings.
+You'll need a Postgres database with pgvector ([Supabase](https://supabase.com) free tier works) and an embedding API key (OpenAI default, any compatible provider supported).
 
 ```bash
 # edit .acr/config.json with DATABASE_URL and EMBEDDING_API_KEY
@@ -101,7 +101,7 @@ Tools: `search_context`, `get_document`, `save_annotation`, `list_sources`
 Sources → Fetch → Normalize → Chunk → Embed → Store → Search
 ```
 
-Anchor crawls your configured sources, converts everything to clean markdown, splits into chunks, generates embeddings via OpenAI, and stores them in Postgres with pgvector. Search queries are embedded the same way and matched via cosine similarity. Results come back with source attribution, section titles, and URLs — citation-ready.
+Anchor crawls your configured sources, converts everything to clean markdown, splits into chunks, generates embeddings, and stores them in Postgres with pgvector. Search queries are embedded the same way and matched via cosine similarity. Results come back with source attribution, section titles, and URLs — citation-ready.
 
 ## Configuration
 
