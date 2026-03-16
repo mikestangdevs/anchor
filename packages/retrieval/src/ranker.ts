@@ -4,9 +4,9 @@ import type { VectorSearchResult } from './search.js';
  * Ranking weights — configurable constants.
  */
 const WEIGHTS = {
-  semanticSimilarity: 0.50,
-  trustBoost: 0.20,
-  freshnessBoost: 0.15,
+  semanticSimilarity: 0.65,
+  trustBoost: 0.10,
+  freshnessBoost: 0.10,
   latestBoost: 0.10,
   annotationBoost: 0.05,
 } as const;
@@ -22,9 +22,9 @@ export interface RankedResult extends VectorSearchResult {
  * Rerank search results using multi-signal scoring.
  *
  * final_score =
- *   semantic_similarity * 0.50
- * + trust_boost         * 0.20
- * + freshness_boost     * 0.15
+ *   semantic_similarity * 0.65
+ * + trust_boost         * 0.10
+ * + freshness_boost     * 0.10
  * + latest_boost        * 0.10
  * + annotation_boost    * 0.05
  */

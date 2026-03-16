@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import { requireDatabaseUrl } from '@acr/config';
 import { getDb, closeDb, sources, documents, chunks, annotations, syncJobs } from '@acr/db';
-import { eq } from 'drizzle-orm';
+import { eq, sql, inArray } from 'drizzle-orm';
 
 export const deleteSourceCommand = new Command('delete-source')
   .description('Delete a source and all its documents, chunks, and sync history')
@@ -30,43 +30,87 @@ export const deleteSourceCommand = new Command('delete-source')
         process.exit(1);
       }
 
-      // Count what will be deleted
-      const docIds = await db.select({ id: documents.id }).from(documents).where(eq(documents.sourceId, source.id));
-      let chunkCount = 0;
-      let annotationCount = 0;
+      // ── Count what will be deleted — 4 aggregate queries, not N loops ──
 
-      for (const doc of docIds) {
-        const docChunks = await db.select({ id: chunks.id }).from(chunks).where(eq(chunks.documentId, doc.id));
-        chunkCount += docChunks.length;
+      // Subquery: document IDs for this source
+      const docIdSubquery = db
+        .select({ id: documents.id })
+        .from(documents)
+        .where(eq(documents.sourceId, source.id));
 
-        const docAnnotations = await db.select({ id: annotations.id }).from(annotations).where(eq(annotations.documentId, doc.id));
-        annotationCount += docAnnotations.length;
-      }
+      const [docCountResult] = await db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(documents)
+        .where(eq(documents.sourceId, source.id));
 
-      const jobCount = (await db.select({ id: syncJobs.id }).from(syncJobs).where(eq(syncJobs.sourceId, source.id))).length;
+      const [chunkCountResult] = await db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(chunks)
+        .where(inArray(chunks.documentId, docIdSubquery));
+
+      const [annotationCountResult] = await db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(annotations)
+        .where(inArray(annotations.documentId!, docIdSubquery));
+
+      const [jobCountResult] = await db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(syncJobs)
+        .where(eq(syncJobs.sourceId, source.id));
+
+      const docCount = docCountResult?.count ?? 0;
+      const chunkCount = chunkCountResult?.count ?? 0;
+      const annotationCount = annotationCountResult?.count ?? 0;
+      const jobCount = jobCountResult?.count ?? 0;
 
       console.log(`Source: ${source.name} (${source.sourceType})`);
       console.log(`  ID:          ${source.id}`);
-      console.log(`  Documents:   ${docIds.length}`);
+      console.log(`  Documents:   ${docCount}`);
       console.log(`  Chunks:      ${chunkCount}`);
       console.log(`  Annotations: ${annotationCount}`);
       console.log(`  Sync jobs:   ${jobCount}`);
       console.log('');
 
       if (!opts.yes) {
-        // Simple confirmation without readline (works in non-interactive)
         console.log('This will permanently delete this source and all associated data.');
         console.log('Run with --yes to confirm:');
         console.log(`  acr delete-source "${name}" --yes`);
         process.exit(0);
       }
 
-      // Delete — cascade handles documents → chunks → annotations
-      await db.delete(syncJobs).where(eq(syncJobs.sourceId, source.id));
+      // ── Delete in dependency order — explicit batched deletes, no cascade ──
+      const t0 = Date.now();
+
+      // 1. Annotations (references chunks + documents)
+      if (annotationCount > 0) {
+        await db.delete(annotations).where(inArray(annotations.documentId!, docIdSubquery));
+      }
+
+      // 2. Chunks (references documents)
+      if (chunkCount > 0) {
+        const tChunks = Date.now();
+        await db.delete(chunks).where(inArray(chunks.documentId, docIdSubquery));
+        console.log(`  ✓ Deleted ${chunkCount.toLocaleString()} chunks in ${Date.now() - tChunks}ms`);
+      }
+
+      // 3. Documents (references source)
+      if (docCount > 0) {
+        const tDocs = Date.now();
+        await db.delete(documents).where(eq(documents.sourceId, source.id));
+        console.log(`  ✓ Deleted ${docCount} documents in ${Date.now() - tDocs}ms`);
+      }
+
+      // 4. Sync jobs (references source)
+      if (jobCount > 0) {
+        await db.delete(syncJobs).where(eq(syncJobs.sourceId, source.id));
+      }
+
+      // 5. Source itself
       await db.delete(sources).where(eq(sources.id, source.id));
 
-      console.log(`✓ Deleted source "${name}" and all associated data.`);
-      console.log(`  ${docIds.length} documents, ${chunkCount} chunks, ${annotationCount} annotations, ${jobCount} sync jobs removed.`);
+      const elapsed = Date.now() - t0;
+      console.log(`✓ Deleted source "${name}" in ${elapsed}ms`);
+      console.log(`  ${docCount} documents, ${chunkCount.toLocaleString()} chunks, ${annotationCount} annotations, ${jobCount} sync jobs removed.`);
     } catch (err) {
       console.error('Delete failed:', err instanceof Error ? err.message : err);
       process.exit(1);

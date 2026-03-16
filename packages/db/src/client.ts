@@ -47,7 +47,8 @@ export function getDb(databaseUrl?: string) {
   const isRemote = url.includes('supabase') || url.includes('neon') || !url.includes('localhost');
 
   _client = postgres(url, {
-    max: 10,
+    // Default 5 connections; configurable via ACR_DB_POOL_SIZE
+    max: parseInt(process.env.ACR_DB_POOL_SIZE ?? '5', 10),
     // Enable SSL for remote connections (required by Supabase/Neon/etc.)
     ...(isRemote ? { ssl: 'require' } : {}),
     // Connection pooling mode — set prepare to false for Supabase/PgBouncer

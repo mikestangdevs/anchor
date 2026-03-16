@@ -1,7 +1,7 @@
-import { eq, and } from 'drizzle-orm';
+import { eq, and, inArray } from 'drizzle-orm';
 import { getDb, documents, chunks, syncJobs, sources } from '@acr/db';
 import { getConnector, type ConnectorConfig } from '@acr/connectors';
-import { normalize, chunkMarkdown, computeVersionHash, hasContentChanged } from '@acr/core';
+import { normalize, chunkMarkdown, computeVersionHash, hasContentChanged, estimateTokens, EMBED_HARD_MAX_TOKENS } from '@acr/core';
 import { extractTitle } from '@acr/parser';
 import { getEmbeddingProvider } from '@acr/embeddings';
 import { getConfig } from '@acr/config';
@@ -22,10 +22,19 @@ export interface SyncStats {
   errors: number;
   /** Total chunks created or recreated */
   chunksCreated: number;
+  /** Chunks that exceeded preferred size and were split by enforceChunkSafety() */
+  chunksSplit: number;
+  /** Chunks that exceeded safe size and were hard-truncated as final fallback */
+  chunksTruncated: number;
+  /** Chunks skipped before embedding because they exceeded EMBED_HARD_MAX_TOKENS */
+  chunksSkippedOversized: number;
 }
 
 function emptyStats(): SyncStats {
-  return { processed: 0, changed: 0, unchanged: 0, skipped: 0, stale: 0, errors: 0, chunksCreated: 0 };
+  return {
+    processed: 0, changed: 0, unchanged: 0, skipped: 0, stale: 0,
+    errors: 0, chunksCreated: 0, chunksSplit: 0, chunksTruncated: 0, chunksSkippedOversized: 0,
+  };
 }
 
 /**
@@ -83,23 +92,66 @@ export async function runSyncPipeline(source: Source): Promise<SyncStats> {
       excludePatterns: source.excludePatterns ?? undefined,
     };
 
+    // Detect TTY for inline progress (used for both crawl and processing phases)
+    const isTTY = process.stdout.isTTY ?? false;
+
+    // Wire crawl progress so user isn't staring at a blank screen
+    connectorConfig.onProgress = (fetched, queued) => {
+      if (isTTY) {
+        process.stdout.write(`\r  Crawling: ${fetched} page${fetched !== 1 ? 's' : ''} fetched, ${queued} queued`);
+      } else if (fetched % 25 === 0) {
+        console.log(`  Crawling: ${fetched} pages fetched, ${queued} queued`);
+      }
+    };
+
     const result = await connector.fetch(connectorConfig);
+
+    // Clear crawl progress line on TTY
+    if (isTTY) {
+      process.stdout.write('\r' + ' '.repeat(80) + '\r');
+    }
     console.log(`  Fetched ${result.pages.length} pages from ${source.name}`);
 
     // Track seen document URLs for staleness detection
     const seenUrls = new Set<string>();
+    const totalPages = result.pages.length;
+    const tSync = Date.now();
 
-    // 3. Process each page
-    for (const page of result.pages) {
+    // 3. Process each page — with progress
+    for (let i = 0; i < result.pages.length; i++) {
+      const page = result.pages[i];
       try {
         await processPage(db, embeddingProvider, source, page, seenUrls, stats);
       } catch (err) {
         console.error(`  Error processing ${page.url}:`, err);
         stats.errors++;
       }
+
+      // Progress output
+      const done = i + 1;
+      const parts: string[] = [];
+      if (stats.processed > 0) parts.push(`${stats.processed} new`);
+      if (stats.changed > 0) parts.push(`${stats.changed} changed`);
+      if (stats.unchanged > 0) parts.push(`${stats.unchanged} unchanged`);
+      if (stats.errors > 0) parts.push(`${stats.errors} errors`);
+      const summary = parts.length > 0 ? ` — ${parts.join(', ')}` : '';
+
+      if (isTTY) {
+        process.stdout.write(`\r  [${done}/${totalPages}]${summary}`);
+      } else if (done === totalPages || done % 25 === 0) {
+        // Non-TTY: print every 25 pages + final
+        console.log(`  [${done}/${totalPages}]${summary}`);
+      }
     }
 
-    // 4. Mark unseen documents as stale
+    // Clear the progress line on TTY
+    if (isTTY && totalPages > 0) {
+      process.stdout.write('\r' + ' '.repeat(80) + '\r');
+    }
+
+    const syncDuration = ((Date.now() - tSync) / 1000).toFixed(1);
+
+    // 4. Mark unseen documents as stale — single batched UPDATE
     const existingDocs = await db
       .select({ id: documents.id, canonicalUrl: documents.canonicalUrl })
       .from(documents)
@@ -110,14 +162,18 @@ export async function runSyncPipeline(source: Source): Promise<SyncStats> {
         ),
       );
 
-    for (const doc of existingDocs) {
-      if (!seenUrls.has(doc.canonicalUrl)) {
-        await db
-          .update(documents)
-          .set({ isLatest: false, updatedAt: new Date() })
-          .where(eq(documents.id, doc.id));
-        stats.stale++;
-      }
+    const staleIds = existingDocs
+      .filter((d) => !seenUrls.has(d.canonicalUrl))
+      .map((d) => d.id);
+
+    if (staleIds.length > 0) {
+      const tStale = Date.now();
+      await db
+        .update(documents)
+        .set({ isLatest: false, updatedAt: new Date() })
+        .where(inArray(documents.id, staleIds));
+      stats.stale = staleIds.length;
+      console.log(`  Marked ${staleIds.length} document(s) stale in ${Date.now() - tStale}ms`);
     }
 
     // 5. Complete sync job
@@ -137,7 +193,13 @@ export async function runSyncPipeline(source: Source): Promise<SyncStats> {
     if (stats.stale > 0) parts.push(`${stats.stale} stale`);
     if (stats.skipped > 0) parts.push(`${stats.skipped} skipped`);
     if (stats.errors > 0) parts.push(`${stats.errors} errors`);
-    console.log(`  Sync completed: ${parts.join(', ')} (${stats.chunksCreated} chunks)`);
+    console.log(`  Sync completed: ${parts.join(', ')} (${stats.chunksCreated} chunks) in ${syncDuration}s`);
+    if (stats.chunksSplit > 0)
+      console.log(`  ⚡ Split ${stats.chunksSplit} oversized chunk(s) for embedding safety`);
+    if (stats.chunksTruncated > 0)
+      console.log(`  ✂ Hard-truncated ${stats.chunksTruncated} chunk(s) as final fallback`);
+    if (stats.chunksSkippedOversized > 0)
+      console.log(`  ⚠ Skipped ${stats.chunksSkippedOversized} chunk(s) that exceeded absolute hard max (bug — report this)`);
 
     return stats;
   } catch (err) {
@@ -236,23 +298,40 @@ async function processPage(
     });
 
     // Re-chunk and re-embed (outside transaction — embedding API calls are slow)
-    const chunkOutputs = chunkMarkdown(cleaned);
+    const chunkStats = { splitCount: 0, truncateCount: 0 };
+    const chunkOutputs = chunkMarkdown(cleaned, chunkStats);
+    stats.chunksSplit += chunkStats.splitCount;
+    stats.chunksTruncated += chunkStats.truncateCount;
+
     if (chunkOutputs.length > 0) {
       const texts = chunkOutputs.map((c) => c.text);
-      const embeddings = await embeddingProvider.embed(texts);
 
-      const chunkValues = chunkOutputs.map((chunk, i) => ({
-        documentId: existing.id,
-        chunkIndex: chunk.chunkIndex,
-        sectionTitle: chunk.sectionTitle ?? null,
-        text: chunk.text,
-        embedding: embeddings[i],
-        tokenCount: chunk.tokenCount,
-        qualityScore: 1.0,
-      }));
+      // Pre-flight guard: last-resort protection before hitting OpenAI
+      const safeTexts = texts.filter((t) => {
+        if (estimateTokens(t) > EMBED_HARD_MAX_TOKENS) {
+          stats.chunksSkippedOversized++;
+          return false;
+        }
+        return true;
+      });
+      const embeddings = await embeddingProvider.embed(safeTexts);
+
+      // Re-align embeddings with chunkOutputs (skip over any dropped chunks)
+      let embIdx = 0;
+      const chunkValues = chunkOutputs
+        .filter((_, i) => estimateTokens(texts[i]) <= EMBED_HARD_MAX_TOKENS)
+        .map((chunk) => ({
+          documentId: existing.id,
+          chunkIndex: chunk.chunkIndex,
+          sectionTitle: chunk.sectionTitle ?? null,
+          text: chunk.text,
+          embedding: embeddings[embIdx++],
+          tokenCount: chunk.tokenCount,
+          qualityScore: 1.0,
+        }));
 
       await db.insert(chunks).values(chunkValues);
-      stats.chunksCreated += chunkOutputs.length;
+      stats.chunksCreated += chunkValues.length;
     }
 
     stats.changed++;
@@ -276,30 +355,43 @@ async function processPage(
     .returning();
 
   // Chunk
-  const chunkOutputs = chunkMarkdown(cleaned);
+  const chunkStats2 = { splitCount: 0, truncateCount: 0 };
+  const chunkOutputs = chunkMarkdown(cleaned, chunkStats2);
+  stats.chunksSplit += chunkStats2.splitCount;
+  stats.chunksTruncated += chunkStats2.truncateCount;
 
   if (chunkOutputs.length === 0) {
     stats.processed++;
     return;
   }
 
-  // Embed all chunks
+  // Embed all chunks — pre-flight guard as last-resort protection
   const texts = chunkOutputs.map((c) => c.text);
-  const embeddings = await embeddingProvider.embed(texts);
+  const safeTexts = texts.filter((t) => {
+    if (estimateTokens(t) > EMBED_HARD_MAX_TOKENS) {
+      stats.chunksSkippedOversized++;
+      return false;
+    }
+    return true;
+  });
+  const embeddings = await embeddingProvider.embed(safeTexts);
 
-  // Insert chunks
-  const chunkValues = chunkOutputs.map((chunk, i) => ({
-    documentId: doc.id,
-    chunkIndex: chunk.chunkIndex,
-    sectionTitle: chunk.sectionTitle ?? null,
-    text: chunk.text,
-    embedding: embeddings[i],
-    tokenCount: chunk.tokenCount,
-    qualityScore: 1.0,
-  }));
+  // Re-align embeddings with chunkOutputs (skip dropped chunks)
+  let embIdx = 0;
+  const chunkValues = chunkOutputs
+    .filter((_, i) => estimateTokens(texts[i]) <= EMBED_HARD_MAX_TOKENS)
+    .map((chunk) => ({
+      documentId: doc.id,
+      chunkIndex: chunk.chunkIndex,
+      sectionTitle: chunk.sectionTitle ?? null,
+      text: chunk.text,
+      embedding: embeddings[embIdx++],
+      tokenCount: chunk.tokenCount,
+      qualityScore: 1.0,
+    }));
 
   await db.insert(chunks).values(chunkValues);
 
   stats.processed++;
-  stats.chunksCreated += chunkOutputs.length;
+  stats.chunksCreated += chunkValues.length;
 }

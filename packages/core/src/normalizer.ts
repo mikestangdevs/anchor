@@ -24,12 +24,34 @@ function removeBoilerplate(markdown: string): string {
   const filtered: string[] = [];
 
   for (const line of lines) {
+    const trimmed = line.trim();
+
     // Skip common footer/navigation patterns
-    if (/^(Previous|Next|Edit this page|Was this helpful|Last updated|Copyright)/i.test(line.trim())) {
+    if (/^(Previous|Next|Edit this page|Was this helpful|Last updated|Copyright)/i.test(trimmed)) {
       continue;
     }
     // Skip breadcrumb-like lines
-    if (/^(Home\s*[>\/]|Docs\s*[>\/])/i.test(line.trim())) {
+    if (/^(Home\s*[>\/]|Docs\s*[>\/])/i.test(trimmed)) {
+      continue;
+    }
+    // Skip "skip to content" links: [Skip to main content](#...) or similar
+    if (/^\[skip\s+to\s/i.test(trimmed)) {
+      continue;
+    }
+    // Skip lines that are ONLY a markdown image (logos, icons, badges used as nav)
+    if (/^!\[.*?\]\(.*?\)$/.test(trimmed) && trimmed.length > 0) {
+      continue;
+    }
+    // Skip empty heading anchor links: [](#anchor-id) or [ ](#anchor-id)
+    if (/^\[\s*\]\(#[^)]*\)$/.test(trimmed)) {
+      continue;
+    }
+    // Skip lines of heading + empty anchor: ## [](#anchor) or ## [\n](#id)
+    if (/^#{1,6}\s+\[\s*\]\(#[^)]*\)\s*$/.test(trimmed)) {
+      continue;
+    }
+    // Skip nav-like link clusters: 3+ consecutive bare links with no prose
+    if (/^(\[.+?\]\(.+?\)\s*){3,}$/.test(trimmed) && !/[.!?,;:]/.test(trimmed.replace(/\[.*?\]\(.*?\)/g, ''))) {
       continue;
     }
     filtered.push(line);

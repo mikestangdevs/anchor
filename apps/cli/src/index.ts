@@ -9,28 +9,47 @@ import { deleteSourceCommand } from './commands/delete-source.js';
 import { listSourcesCommand } from './commands/list-sources.js';
 import { sourceInspectCommand } from './commands/source-inspect.js';
 import { syncCommand } from './commands/sync.js';
+import { workerCommand } from './commands/worker.js';
 import { searchCommand } from './commands/search.js';
 import { getDocumentCommand } from './commands/get-document.js';
 import { annotateCommand } from './commands/annotate.js';
+import { setupCommand } from './commands/setup-local.js';
 import { runMcpCommand } from './commands/run-mcp.js';
+import { statusCommand } from './commands/status.js';
+import { quickstartCommand } from './commands/quickstart.js';
 import { getCompactHeader } from './branding.js';
 
 const program = new Command();
 
 program
   .name('acr')
-  .description('Anchor — agent-first context infrastructure')
-  .version('0.1.0-beta.2')
-  .addHelpText('before', getCompactHeader());
+  .description('Anchor — the context layer for agents')
+  .version('0.1.0-beta.3')
+  .addHelpText('before', getCompactHeader())
+  .addHelpText('after', `
+Quick Start:
+
+  Solo/dev:   acr setup → source add → sync → search
+  Agents:     acr setup → source add → sync → run-mcp --http
+  Demo:       acr quickstart    (loads the agent stack starter pack)
+
+Modes:
+
+  stdio MCP     Simple / local / single-client
+  HTTP MCP      Multi-agent / federated / production
+`);
 
 // ── Setup ──
 initCommand.description('Initialize ACR in the current directory');
 dbPushCommand.description('Push database schema (safe migration by default)');
 doctorCommand.description('Verify configuration, database, and provider setup');
 
+program.addCommand(setupCommand);
 program.addCommand(initCommand);
 program.addCommand(dbPushCommand);
 program.addCommand(doctorCommand);
+program.addCommand(statusCommand);
+program.addCommand(quickstartCommand);
 
 // ── Source Management (grouped) ──
 const sourceGroup = new Command('source')
@@ -101,9 +120,11 @@ program.addCommand(deleteSourceAlias, { hidden: true });
 
 // ── Sync & Retrieval ──
 syncCommand.description('Sync one or all sources (fetch → chunk → embed)');
+workerCommand.description('Run background sync — keeps sources fresh automatically');
 searchCommand.description('Semantic search across all synced context');
 
 program.addCommand(syncCommand);
+program.addCommand(workerCommand);
 program.addCommand(searchCommand);
 program.addCommand(getDocumentCommand);
 program.addCommand(annotateCommand);

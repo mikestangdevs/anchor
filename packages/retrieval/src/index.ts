@@ -1,6 +1,7 @@
 import { eq, inArray } from 'drizzle-orm';
 import { getDb, annotations } from '@acr/db';
 import type { SearchRequest, SearchResponse, EmbeddingProvider, Annotation } from '@acr/types';
+import type { Semaphore, EmbedCache } from '@acr/core';
 import { vectorSearch } from './search.js';
 import { rankResults } from './ranker.js';
 import { formatResults } from './formatter.js';
@@ -9,15 +10,40 @@ export { vectorSearch } from './search.js';
 export { rankResults } from './ranker.js';
 export { formatResults } from './formatter.js';
 
+/** Optional throughput controls for multi-agent use. */
+export interface ThroughputOptions {
+  embedCache?: EmbedCache;
+  embedSemaphore?: Semaphore;
+}
+
 /**
  * Full retrieval pipeline: embed query → vector search → load annotations → rerank → format.
  */
 export async function searchContext(
   request: SearchRequest,
   embeddingProvider: EmbeddingProvider,
+  throughput?: ThroughputOptions,
 ): Promise<SearchResponse> {
-  // 1. Embed the query
-  const [queryEmbedding] = await embeddingProvider.embed([request.query]);
+  // 1. Embed the query — with optional cache + concurrency limiting
+  let queryEmbedding: number[];
+
+  if (throughput?.embedCache) {
+    queryEmbedding = await throughput.embedCache.getOrEmbed(
+      request.query,
+      async (text: string) => {
+        const embed = () => embeddingProvider.embed([text]).then((r) => r[0]);
+        return throughput.embedSemaphore
+          ? throughput.embedSemaphore.run(embed)
+          : embed();
+      },
+    );
+  } else if (throughput?.embedSemaphore) {
+    [queryEmbedding] = await throughput.embedSemaphore.run(
+      () => embeddingProvider.embed([request.query]),
+    );
+  } else {
+    [queryEmbedding] = await embeddingProvider.embed([request.query]);
+  }
 
   // 2. Vector search
   const rawResults = await vectorSearch(queryEmbedding, request);

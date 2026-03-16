@@ -19,6 +19,9 @@ export interface ConnectorConfig {
   sourceId: string;
   name: string;
 
+  /** Optional progress callback — called by connectors as pages are fetched. */
+  onProgress?: (fetched: number, queued: number) => void;
+
   // docs_site
   baseUrl?: string;
   maxPages?: number;

@@ -140,11 +140,14 @@ export interface CitationRef {
 
 export interface SearchResult {
   chunkId: string;
+  documentId: string;
   chunkText: string;
   sectionTitle: string | null;
   score: number;
   citation: CitationRef;
   annotations: Annotation[];
+  /** Number of additional chunks from the same document that also matched (beyond the representative). */
+  additionalChunkCount: number;
 }
 
 export interface SearchResponse {

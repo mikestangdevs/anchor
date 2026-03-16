@@ -94,6 +94,9 @@ export class DocsSiteConnector extends BaseConnector {
           }
         }
 
+        // Report progress
+        config.onProgress?.(pages.length, queue.length);
+
         // Be polite
         await sleep(CRAWL_DELAY_MS);
       } catch (err) {

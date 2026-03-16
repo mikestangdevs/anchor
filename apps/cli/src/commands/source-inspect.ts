@@ -129,6 +129,31 @@ export const sourceInspectCommand = new Command('source-inspect')
       console.log('  ── Stats ──');
       console.log(`  Documents:  ${docStats.total} total, ${docStats.latest} latest`);
       console.log(`  Chunks:     ${chunkStats.total}`);
+
+      // Searchability check
+      const isSearchable = docStats.total > 0 && chunkStats.total > 0 && docStats.latest > 0;
+      if (isSearchable) {
+        console.log('  Searchable: ✓ yes');
+      } else if (docStats.total === 0) {
+        console.log('  Searchable: ✗ no documents — run: acr sync --source "' + source.name + '"');
+      } else if (chunkStats.total === 0) {
+        console.log('  Searchable: ✗ no chunks — sync may have failed');
+      } else {
+        console.log('  Searchable: ✗ all documents marked stale');
+      }
+
+      // Chunk safety stats from latest completed sync
+      const latestCompleted = recentJobs.find(j => j.status === 'completed');
+      if (latestCompleted?.statsJson && typeof latestCompleted.statsJson === 'object') {
+        const s = latestCompleted.statsJson as Record<string, number>;
+        if (s.chunksSplit || s.chunksTruncated || s.chunksSkippedOversized) {
+          const parts: string[] = [];
+          if (s.chunksSplit) parts.push(`${s.chunksSplit} split`);
+          if (s.chunksTruncated) parts.push(`${s.chunksTruncated} truncated`);
+          if (s.chunksSkippedOversized) parts.push(`${s.chunksSkippedOversized} skipped (oversized)`);
+          console.log('  Chunk safety: ' + parts.join(', '));
+        }
+      }
       console.log('');
 
       // ── Recent Syncs ──
@@ -164,6 +189,34 @@ export const sourceInspectCommand = new Command('source-inspect')
           const error = job.errorMessage ? `\n               Error: ${job.errorMessage}` : '';
 
           console.log(`  ${status} ${job.jobType.padEnd(12)} ${date}${duration}${stats}${error}`);
+        }
+
+        // ── Next Sync Due ──
+        const latestCompletedJob = recentJobs.find(j => j.status === 'completed');
+        if (latestCompletedJob?.completedAt) {
+          const nextDue = new Date(latestCompletedJob.completedAt.getTime() + source.syncFrequencyMinutes * 60_000);
+          const now = Date.now();
+          if (nextDue.getTime() > now) {
+            const diffMin = Math.floor((nextDue.getTime() - now) / 60_000);
+            const hr = Math.floor(diffMin / 60);
+            const min = diffMin % 60;
+            console.log(`  Next sync due in ${hr > 0 ? hr + 'h ' : ''}${min}m`);
+          } else {
+            console.log('  ⚠ Sync overdue — run: acr sync --source "' + source.name + '"');
+          }
+        }
+
+        // ── Last Error ──
+        const lastFailed = recentJobs.find(j => j.status === 'failed');
+        if (lastFailed && lastFailed.errorMessage) {
+          // Only show if the last failed job is more recent or same as last completed
+          const lastCompletedTime = latestCompletedJob?.completedAt?.getTime() ?? 0;
+          const lastFailedTime = lastFailed.createdAt.getTime();
+          if (lastFailedTime >= lastCompletedTime) {
+            console.log('');
+            console.log('  ── Last Error ──');
+            console.log('  ' + lastFailed.errorMessage);
+          }
         }
       }
       console.log('');

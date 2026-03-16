@@ -28,7 +28,9 @@ export async function vectorSearch(
   request: SearchRequest,
 ): Promise<VectorSearchResult[]> {
   const db = getDb();
-  const limit = Math.min((request.maxResults ?? 10) * 5, 50); // Fetch 5x for reranking headroom
+  // Fetch 3x to allow document-level grouping headroom (dedupe reduces displayed count).
+  // Hard cap at 50 to avoid over-querying pgvector.
+  const limit = Math.min((request.maxResults ?? 10) * 3, 50);
 
   // Build the embedding literal for pgvector
   const embeddingLiteral = `[${queryEmbedding.join(',')}]`;
@@ -59,6 +61,10 @@ export async function vectorSearch(
       and(
         // Filter out chunks without embeddings
         sql`${chunks.embedding} IS NOT NULL`,
+        // Minimum similarity floor — filter out semantically irrelevant noise
+        // Similarity floor — raise to reduce noisy/low-confidence matches.
+        // Below 0.35, cosine similarity is too weak to be useful for doc retrieval.
+        sql`1 - (${chunks.embedding} <=> ${embeddingLiteral}::vector) > 0.35`,
         // Filter by latest only if requested
         request.latestOnly !== false ? eq(documents.isLatest, true) : undefined,
         // Filter by source if specified
